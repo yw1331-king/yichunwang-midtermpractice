@@ -1,0 +1,389 @@
+title: "midterm"
+author: "yichun Wang"
+date: "2025-10-13"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+```{r}
+pkgs <- c("readr","readxl","dplyr","ggplot2","forecast","tseries",
+          "lubridate","tidyr","knitr")
+need <- setdiff(pkgs, rownames(installed.packages()))
+if (length(need)) install.packages(need, repos = "https://cloud.r-project.org")
+invisible(lapply(pkgs, library, character.only = TRUE))
+```
+
+
+```{r}
+req <- function(p) { if (!requireNamespace(p, quietly = TRUE)) install.packages(p); library(p, character.only = TRUE) }
+req("forecast")
+req("ggplot2")
+req("dplyr")
+req("readr")
+req("tseries")
+req("tibble")
+req("zoo")
+req("gridExtra")
+theme_set(theme_minimal())
+```
+
+
+
+```{r}
+df <- readr::read_csv("AirPassengers.csv", show_col_types = FALSE)
+df$Date <- as.Date(paste0(df$Date, "-01"), format = "%Y-%m-%d")
+start_year  <- as.integer(format(min(df$Date), "%Y"))
+start_month <- as.integer(format(min(df$Date), "%m"))
+AP <- ts(df$Passengers, start = c(start_year, start_month), frequency = 12)
+train <- window(AP, end = c(1959, 12))
+test  <- window(AP, start = c(1960, 1))
+h <- length(test)
+paste("Train length:", length(train), "| Test length:", length(test), "| Frequency:", frequency(AP))
+```
+
+
+
+```{r}
+autoplot(AP) +
+  labs(title = "AirPassengers — Time Series", x = "Year", y = "Passengers")
+```
+
+**Observations**
+- Clear **upward trend** across years.
+- Strong **seasonality** repeating every 12 months (summer peaks, winter troughs).
+- **Increasing variance** over time → multiplicative seasonal behavior likely.
+
+```{r}
+Acf(AP, main = "ACF of AirPassengers")
+```
+**Observations**
+- The ACF of the AirPassengers series shows a very high lag-1 correlation and a gradual decay pattern, indicating a strong upward trend.
+- Distinct spikes at every 12th lag confirm annual seasonality.
+- The slow decay and repeating peaks suggest that the time series is non-stationary and exhibits multiplicative seasonal structure — trends and seasonal cycles persist over time.
+
+```{r}
+stats <- summary(as.numeric(AP))
+stats_tbl <- tibble::tibble(
+  Min = stats["Min."],
+  Q1  = stats["1st Qu."],
+  Median = stats["Median"],
+  Mean = stats["Mean"],
+  Q3  = stats["3rd Qu."],
+  Max = stats["Max."]
+)
+stats_tbl
+```
+**Summarize my Observations**
+- From the summary statistics and box plot, the AirPassengers data shows a steady upward trend, right-skewed distribution, and increasing seasonal variability, indicating a non-stationary, multiplicative time series with growing air travel over time.
+
+```{r}
+boxplot(AP, main = "Boxplot of AirPassengers", ylab = "Passengers")
+```
+**Interpretation**
+- Right-skewed distribution; higher values become more frequent later in the period.
+- Seasonal peaks yield high-end values; troughs in winter months produce lower whiskers.
+
+```{r}
+fit_naive <- naive(train, h = h)
+autoplot(fit_naive) + labs(title = "Naive Forecast (12-month horizon)", x = "Year", y = "Passengers")
+```
+```{r}
+res_n <- as.numeric(residuals(fit_naive))
+p1 <- ggplot(data.frame(idx=seq_along(res_n), res=res_n), aes(idx, res)) +
+  geom_line(na.rm=TRUE) + labs(title = "Naive: Residuals over Time", x = "Index", y = "Residuals")
+p2 <- ggplot(data.frame(res=res_n), aes(x=res)) + geom_histogram(bins=12, na.rm=TRUE) +
+  labs(title="Naive: Residual Histogram", x="Residual", y="Count")
+p3 <- ggplot(data.frame(fitted=as.numeric(fitted(fit_naive)), res=res_n), aes(fitted, res)) +
+  geom_point(na.rm=TRUE) + geom_hline(yintercept=0, linetype="dashed") +
+  labs(title="Naive: Fitted vs Residuals", x="Fitted", y="Residuals")
+p4 <- ggplot(data.frame(actual=as.numeric(train), res=res_n), aes(actual, res)) +
+  geom_point(na.rm=TRUE) + geom_hline(yintercept=0, linetype="dashed") +
+  labs(title="Naive: Actual vs Residuals", x="Actual", y="Residuals")
+p5 <- ggAcf(na.omit(res_n)) + ggtitle("Naive: ACF of Residuals")
+gridExtra::grid.arrange(p1, p2, p3, p4, p5, ncol = 2)
+```
+**Indications**
+## 1. Plot of Residuals Over Time
+The residual plot shows systematic patterns over time, indicating the model does not fully capture the seasonality and trend of the data.
+
+## 2. Histogram of Residuals
+The histogram of residuals is not perfectly symmetric, showing a slight right skew, which indicates that residuals are not normally distributed and may contain remaining structure.
+
+## 3. Fitted Values vs. Residuals
+The residuals increase with fitted values, indicating heteroscedasticity — the model’s errors grow as passenger levels increase, suggesting multiplicative behavior.
+
+## 4. Actual Values vs. Residuals
+The residuals are correlated with the magnitude of the actual values, confirming the model’s lack of fit and multiplicative variance structure.
+
+## 5. ACF (Autocorrelation Function) of Residuals
+The ACF plot shows significant autocorrelation at seasonal lags, implying that residuals are not white noise — the model has missed part of the seasonal structure.
+
+```{r}
+acc_naive <- accuracy(fit_naive, test)
+naive_fc_tbl <- tibble::tibble(Date = seq(as.Date("1960-01-01"), by="month", length.out=h),
+                               Forecast = as.numeric(fit_naive$mean))
+list(Accuracy = acc_naive, `Next 12 Months Forecast` = naive_fc_tbl)
+```
+**How Good Is the Accuracy?**
+- The Naïve model has low accuracy for this dataset because it cannot capture the upward trend and seasonal cycles.
+**Forecast for One Year Ahead**
+- The Naïve forecast predicts no growth and no seasonality, which is unrealistic given the data’s upward trend.
+**Other Observations**
+- The Naïve forecast provides a simple baseline, but it does not adequately model the growth or seasonal structure of the AirPassengers series. It’s mainly used for comparison rather than as a reliable forecasting tool.
+
+```{r}
+ma3 <- forecast::ma(AP, order = 3)
+ma6 <- forecast::ma(AP, order = 6)
+ma9 <- forecast::ma(AP, order = 9)
+autoplot(AP) + autolayer(ma3, series = "MA(3)",na.rm =TRUE) + autolayer(ma6, series = "MA(6)",na.rm = TRUE) +
+  autolayer(ma9, series = "MA(9)", na.rm = TRUE) + labs(title = "Simple Moving Averages (3/6/9)", x = "Year", y = "Passengers")
+```
+```{r}
+ma12 <- stats::filter(train, rep(1/12,12), sides = 1)
+last_ma12 <- as.numeric(tail(ma12, 1))
+fc_ma12 <- ts(rep(last_ma12, h), start = c(1960,1), frequency = 12)
+autoplot(window(AP, start=c(1958,1))) + autolayer(fc_ma12, series="MA(12) Forecast") +
+  labs(title="MA(12) Flat Forecast for Next 12 Months")
+mae <- mean(abs(test - fc_ma12)); rmse <- sqrt(mean((test - fc_ma12)^2))
+tibble::tibble(MAE = mae, RMSE = rmse)
+```
+
+**What are your observations of the plot as the moving average order goes up?**
+- Increasing the moving average order makes the series smoother and less sensitive to short-term changes, trading responsiveness for clearer trend visibility.
+
+```{r}
+fit_ses <- ses(train, h = h)
+autoplot(fit_ses) + labs(title="Simple Exponential Smoothing (SES)", x="Year", y="Passengers")
+summary(fit_ses)
+```
+```{r}
+res_ses <- as.numeric(residuals(fit_ses))
+p1 <- ggplot(data.frame(idx=seq_along(res_ses), res=res_ses), aes(idx, res)) + geom_line(na.rm=TRUE) +
+  labs(title = "SES: Residuals over Time", x = "Index", y = "Residuals")
+p2 <- ggplot(data.frame(res=res_ses), aes(x=res)) + geom_histogram(bins=12, na.rm=TRUE) +
+  labs(title="SES: Residual Histogram", x="Residual", y="Count")
+p3 <- ggplot(data.frame(fitted=as.numeric(fitted(fit_ses)), res=res_ses), aes(fitted, res)) +
+  geom_point(na.rm=TRUE) + geom_hline(yintercept=0, linetype="dashed") +
+  labs(title="SES: Fitted vs Residuals", x="Fitted", y="Residuals")
+p4 <- ggplot(data.frame(actual=as.numeric(train), res=res_ses), aes(actual, res)) +
+  geom_point(na.rm=TRUE) + geom_hline(yintercept=0, linetype="dashed") +
+  labs(title="SES: Actual vs Residuals", x="Actual", y="Residuals")
+p5 <- ggAcf(na.omit(res_ses)) + ggtitle("SES: ACF of Residuals")
+gridExtra::grid.arrange(p1, p2, p3, p4, p5, ncol = 2)
+acc_ses <- accuracy(fit_ses, test)
+acc_ses
+```
+
+**How Good Is the Accuracy?**
+- The SES model provides smoother forecasts than Naïve but still lacks precision because it does not include trend or seasonal adjustments.
+**Forecast for One Year Ahead**
+- The SES model predicts modest growth, but it fails to reproduce the strong seasonal peaks observed in the historical data.
+**Other Observations**
+- The residual plot still shows repeating waves, meaning seasonal structure remains unexplained.
+- The histogram is roughly centered around zero but not perfectly normal — indicating mild bias or remaining pattern.
+- The residuals appear randomly scattered, but with slightly higher spread for larger fitted values → indicates increasing variance.
+- Residuals show wider dispersion at higher actual values — confirms heteroscedasticity (multiplicative variance).
+- Noticeable spikes at lag 12 (and nearby lags), indicating seasonal autocorrelation that SES failed to capture.
+
+```{r}
+fit_hw <- hw(train, seasonal = "multiplicative", h = h)
+autoplot(fit_hw) + labs(title="Holt-Winters (Multiplicative)", x="Year", y="Passengers")
+summary(fit_hw)
+```
+
+```{r}
+res_hw <- as.numeric(residuals(fit_hw))
+p1 <- ggplot(data.frame(idx=seq_along(res_hw), res=res_hw), aes(idx, res)) + geom_line(na.rm=TRUE) +
+  labs(title = "HW: Residuals over Time", x = "Index", y = "Residuals")
+p2 <- ggplot(data.frame(res=res_hw), aes(x=res)) + geom_histogram(bins=12, na.rm=TRUE) +
+  labs(title="HW: Residual Histogram", x="Residual", y="Count")
+p3 <- ggplot(data.frame(fitted=as.numeric(fitted(fit_hw)), res=res_hw), aes(fitted, res)) +
+  geom_point(na.rm=TRUE) + geom_hline(yintercept=0, linetype="dashed") +
+  labs(title="HW: Fitted vs Residuals", x="Fitted", y="Residuals")
+p4 <- ggplot(data.frame(actual=as.numeric(train), res=res_hw), aes(actual, res)) +
+  geom_point(na.rm=TRUE) + geom_hline(yintercept=0, linetype="dashed") +
+  labs(title="HW: Actual vs Residuals", x="Actual", y="Residuals")
+p5 <- ggAcf(na.omit(res_hw)) + ggtitle("HW: ACF of Residuals")
+gridExtra::grid.arrange(p1, p2, p3, p4, p5, ncol = 2)
+acc_hw <- accuracy(fit_hw, test)
+acc_hw
+```
+
+**How Good Is the Accuracy?**
+- The Holt–Winters (multiplicative) model achieves strong accuracy, capturing both the long-term trend and seasonal pattern with minimal residual error.
+**Forecast for One Year Ahead**
+- The forecast indicates continued growth in international air travel, maintaining strong annual seasonality with larger peaks each year.
+**Other Observations**
+- The residuals fluctuate randomly around zero, showing no visible trend or seasonality — a sign of good model fit.
+- The histogram is approximately bell-shaped and symmetric, suggesting residuals are close to normally distributed.
+- Points are scattered randomly around zero, with no clear pattern or heteroscedasticity — confirming constant variance and no systematic bias.
+- All autocorrelations lie within the 95% confidence bounds, meaning the residuals are uncorrelated — the model has captured all major structure.
+
+```{r}
+if (!exists("y")) {
+  if (exists("df")) {
+    
+    guess_date  <- intersect(names(df), c("Date","date","DATE"))[1]
+    guess_value <- setdiff(names(df), guess_date)[1]
+    if (!is.na(guess_date) && !is.na(guess_value)) {
+      df <- dplyr::arrange(df, !!rlang::sym(guess_date))
+      start_year  <- lubridate::year(min(df[[guess_date]], na.rm = TRUE))
+      start_month <- lubridate::month(min(df[[guess_date]], na.rm = TRUE))
+      y <- ts(df[[guess_value]], start = c(start_year, start_month), frequency = 12)
+    }
+  }
+  if (!exists("y")) {
+    set.seed(1)
+    y <- ts(100 + cumsum(rnorm(120, 0.2, 1)) + 5*sin(2*pi*(1:120)/12),
+            start = c(2015, 1), frequency = 12)
+    message("NOTE: 'y' was not defined. Using a demo monthly series so the chunk can run.")
+  }
+}
+
+dec_add <- stl(y, s.window = "periodic", robust = TRUE)
+autoplot(dec_add) + ggtitle("STL Decomposition — Additive")
+
+can_log <- all(y > 0, na.rm = TRUE)
+if (can_log) {
+  dec_mul <- stl(log(y), s.window = "periodic", robust = TRUE)
+  autoplot(dec_mul) + ggtitle("STL Decomposition — Multiplicative (log scale)")
+} else {
+  dec_mul <- NULL
+}
+
+# 2) Seasonal strength measure
+seasonal_strength <- function(dec) {
+  s <- dec$time.series[, "seasonal"]
+  r <- dec$time.series[, "remainder"]
+  max(0, 1 - var(r, na.rm=TRUE) / var(r + s, na.rm=TRUE))
+}
+Fs_add <- seasonal_strength(dec_add)
+Fs_mul <- if (!is.null(dec_mul)) seasonal_strength(dec_mul) else NA
+
+cat(sprintf("Seasonal strength (Additive): %.3f\n", Fs_add))
+if (!is.na(Fs_mul)) cat(sprintf("Seasonal strength (Multiplicative): %.3f\n", Fs_mul))
+
+has_season <- (Fs_add > 0.3) | (!is.na(Fs_mul) & Fs_mul > 0.3)
+cat("Is the time series seasonal? ", ifelse(has_season, "Yes", "No"), "\n")
+
+# 3) Choose decomposition type by higher seasonal strength
+chosen_type <- if (!is.na(Fs_mul) && Fs_mul > Fs_add) "Multiplicative" else "Additive"
+chosen_dec <- if (chosen_type == "Multiplicative") dec_mul else dec_add
+cat("Chosen decomposition type: ", chosen_type, "\n")
+
+# 4) Monthly seasonal indices
+freq <- frequency(y)
+seas <- chosen_dec$time.series[, "seasonal"]
+
+if (chosen_type == "Additive") {
+  idx <- tapply(seas, rep(1:freq, length.out=length(seas)), mean, na.rm=TRUE)
+  idx_round <- round(idx, 2)
+} else {
+  idx <- exp(tapply(seas, rep(1:freq, length.out=length(seas)), mean, na.rm=TRUE))
+  idx_round <- round(idx, 4)
+}
+
+if (freq == 12) {
+  names(idx_round) <- month.abb
+} else if (freq == 4) {
+  names(idx_round) <- paste0("Q", 1:4)
+} else {
+  names(idx_round) <- paste0("P", 1:freq)
+}
+
+cat("Seasonal indices:\n"); print(idx_round)
+
+hi <- names(idx_round)[which.max(idx_round)]
+lo <- names(idx_round)[which.min(idx_round)]
+cat(sprintf("Highest month: %s (index = %g)\n", hi, idx_round[hi]))
+cat(sprintf("Lowest  month: %s (index = %g)\n",  lo, idx_round[lo]))
+
+# 5) Seasonally adjusted series & overlay
+if (chosen_type == "Additive") {
+  y_sa <- y - chosen_dec$time.series[, "seasonal"]
+  title_adj <- "Seasonally Adjusted — Additive"
+} else {
+  seas_factor <- ts(exp(chosen_dec$time.series[, "seasonal"]),
+                    start = start(y), frequency = freq)
+  y_sa <- y / seas_factor
+  title_adj <- "Seasonally Adjusted — Multiplicative"
+}
+
+df_plot <- data.frame(
+  t = as.numeric(time(y)),
+  Actual = as.numeric(y),
+  SA = as.numeric(y_sa)
+)
+
+ggplot(df_plot, aes(x = t)) +
+  geom_line(aes(y = Actual, linetype = "Actual")) +
+  geom_line(aes(y = SA, linetype = "Seasonally Adjusted")) +
+  labs(title = paste("Actual vs Seasonally Adjusted (", chosen_type, ")"),
+       x = "Time", y = "Value", linetype = "Series") +
+  theme_minimal()
+
+# 6) Magnitude of seasonal fluctuations
+if (chosen_type == "Additive") {
+  rel_mag <- abs(as.numeric(y) - as.numeric(y_sa)) / sd(as.numeric(y), na.rm = TRUE)
+} else {
+  ratio <- as.numeric(y) / as.numeric(y_sa)
+  rel_mag <- abs(log(ratio)) / sd(log(as.numeric(y)), na.rm = TRUE)
+}
+cat(sprintf("Median relative fluctuation due to seasonality: %.3f\n",
+            median(rel_mag, na.rm = TRUE)))
+```
+
+
+```{r}
+h <- 12
+fit_naive <- naive(train, h=h)
+fit_snaive <- snaive(train, h=h)
+fit_ses <- ses(train, h=h)
+fit_hw <- hw(train, h=h, seasonal="multiplicative")
+fit_auto <- auto.arima(train)
+ma12 <- stats::filter(train, rep(1/12,12), sides=1)
+last_ma12 <- as.numeric(tail(ma12,1))
+fc_ma12_ts <- ts(rep(last_ma12,h), start=c(1960,1), frequency=12)
+```
+
+
+
+```{r}
+fit_snaive <- snaive(train, h = h)
+ma12 <- stats::filter(train, rep(1/12, 12), sides = 1)
+last_ma12 <- as.numeric(tail(ma12, 1)) 
+fc_ma12_ts <- ts(rep(last_ma12, h),                     
+                 start = c(1960, 1),
+                 frequency = 12)
+acc_tbl <- dplyr::bind_rows(
+  tibble::as_tibble(accuracy(fit_naive, test)) |> mutate(Model="Naive"),
+  tibble::as_tibble(accuracy(fit_snaive, test)) |> mutate(Model="Seasonal Naive"),
+  tibble::as_tibble(accuracy(fit_ses, test))    |> mutate(Model="SES"),
+  tibble::as_tibble(accuracy(fit_hw, test))     |> mutate(Model="Holt-Winters (mult)"),
+  {
+    mae <- mean(abs(test - fc_ma12_ts)); rmse <- sqrt(mean((test - fc_ma12_ts)^2))
+    tibble::tibble(ME = mean(test - fc_ma12_ts), RMSE = rmse, MAE = mae,
+                   MPE = mean((test - fc_ma12_ts)/test*100),
+                   MAPE = mean(abs((test - fc_ma12_ts)/test*100)),
+                   MASE = NA_real_, ACF1 = NA_real_,
+                   Model="MA(12)")
+  },
+  {
+    fc_auto <- forecast(fit_auto, h=h)
+    tibble::as_tibble(accuracy(fc_auto, test)) |> mutate(Model="ARIMA (auto)")
+  }
+) |> dplyr::select(Model, MAE, RMSE, MAPE, ME, MPE, MASE, ACF1) |> arrange(RMSE)
+acc_tbl
+```
+**Summary**
+- Best Models: ARIMA (auto) and Holt–Winters (multiplicative) — both capture trend and seasonality effectively.
+- Worst Model: MA(12) — overly smoothed, ignores trend and seasonal variation.
+- Naïve & Seasonal Naïve: simple baselines, but not sufficient for non-stationary series.
+- SES: moderate performance, fails under multiplicative trend/seasonality.
+
+# Conclusion
+- Trend is increasing; strong annual seasonality; multiplicative behavior.
+- Holt–Winters (mult) and ARIMA (auto) typically lowest errors.
+- Next year: continued growth with summer peaks; two-year horizon similar trend barring shocks.
